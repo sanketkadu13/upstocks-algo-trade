@@ -1,0 +1,19 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+websockets==14.1
+python-dotenv==1.0.1
+protobuf==5.29.2
+pydantic==2.10.4
+
+# automated daily OAuth login (drives the real Upstox login page headlessly)
+pyotp==2.9.0
+playwright==1.49.1
+# after install run once: python -m playwright install chromium
+
+# dev-only, used to regenerate app/proto/MarketDataFeed_pb2.py from the .proto
+grpcio-tools==1.68.1
+
+# listed per spec; not used directly (v3 feed + fine-grained error handling are
+# implemented via direct REST/WebSocket calls instead, see plan notes)
+upstox-python-sdk==2.18.0

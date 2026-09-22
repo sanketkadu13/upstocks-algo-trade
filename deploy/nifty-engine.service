@@ -1,0 +1,43 @@
+[Unit]
+Description=NIFTY Options Engine (Upstox)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/nifty-engine
+# .env is read by the app itself via python-dotenv. systemd's EnvironmentFile
+# parser is NOT dotenv-compatible (it mangles quotes, '#' and spaces), so we
+# deliberately do not point it at .env — a password containing '#' would
+# silently break under systemd's parser.
+ExecStart=/opt/nifty-engine/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8000 \
+    --workers 1 \
+    --proxy-headers --forwarded-allow-ips='127.0.0.1'
+
+# One worker only, and this is not a tuning choice: the engine keeps live
+# position state, the price cache and the kill switch in process memory. A
+# second worker would be a second engine placing its own orders against the
+# same strategies.
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Let the app flush an exit cleanly rather than being killed mid-order.
+KillSignal=SIGINT
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nifty-engine
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/nifty-engine/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+
+data/*.json
+data/*.jsonl
+data/*.json.gz
+data/auto_login_debug/
+!data/.gitkeep

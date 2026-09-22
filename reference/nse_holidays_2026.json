@@ -1,0 +1,23 @@
+{
+  "year": 2026,
+  "source": "NSE trading holiday list",
+  "note": "VERIFY each year against https://www.nseindia.com/resources/exchange-communication-holidays — lunar/Islamic dates shift and NSE publishes the official list in advance. Entries marked tentative should be confirmed.",
+  "holidays": [
+    {"date": "2026-01-26", "name": "Republic Day"},
+    {"date": "2026-03-04", "name": "Holi", "tentative": true},
+    {"date": "2026-03-21", "name": "Id-Ul-Fitr (Ramzan Id)", "tentative": true},
+    {"date": "2026-04-01", "name": "Mahavir Jayanti", "tentative": true},
+    {"date": "2026-04-03", "name": "Good Friday"},
+    {"date": "2026-04-14", "name": "Dr. Baba Saheb Ambedkar Jayanti"},
+    {"date": "2026-05-01", "name": "Maharashtra Day"},
+    {"date": "2026-05-28", "name": "Bakri Id", "tentative": true},
+    {"date": "2026-08-15", "name": "Independence Day"},
+    {"date": "2026-08-26", "name": "Muharram", "tentative": true},
+    {"date": "2026-10-02", "name": "Mahatma Gandhi Jayanti"},
+    {"date": "2026-10-20", "name": "Dussehra", "tentative": true},
+    {"date": "2026-11-09", "name": "Diwali Laxmi Pujan", "tentative": true},
+    {"date": "2026-11-10", "name": "Diwali Balipratipada", "tentative": true},
+    {"date": "2026-11-24", "name": "Guru Nanak Jayanti", "tentative": true},
+    {"date": "2026-12-25", "name": "Christmas"}
+  ]
+}

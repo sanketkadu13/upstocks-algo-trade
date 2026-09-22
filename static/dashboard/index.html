@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NIFTY Options Engine</title>
+  <script>
+    // Apply theme before first paint so there's no flash of the wrong palette.
+    (function () {
+      try {
+        var t = localStorage.getItem("theme") || "dark";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/dashboard/app.css" />
+</head>
+<body>
+  <div id="kill-banner" class="banner banner-kill" hidden>
+    🛑 <b>KILL SWITCH ARMED</b> — every new order is being refused.
+    <button class="btn btn-ghost btn-small" data-action="release-kill">Release</button>
+  </div>
+  <div id="auth-banner" class="banner banner-warn" hidden>
+    Broker not authenticated — live prices and orders are unavailable.
+    <a href="/api/auth/login" target="_blank" rel="noopener">Log in to Upstox</a>
+    <span class="banner-totp" id="banner-totp" hidden>
+      <span class="muted small">TOTP</span>
+      <button class="totp-chip" id="banner-totp-code" data-action="copy-totp" title="Click to copy">------</button>
+      <span class="totp-bar"><i id="banner-totp-bar"></i></span>
+    </span>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-name">NIFTY <b>ENGINE</b></div>
+        <div class="brand-sub">Upstox · options</div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-btn" data-view="dashboard">Dashboard</button>
+        <button class="nav-btn" data-view="strategies">Strategies</button>
+        <button class="nav-btn" data-view="ipo">IPO Watch</button>
+        <button class="nav-btn" data-view="ledger">Ledger</button>
+        <button class="nav-btn" data-view="active">Active</button>
+        <button class="nav-btn" data-view="activity">Activity</button>
+        <button class="nav-btn" data-view="settings">Settings</button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="stat-card">
+          <div class="stat-row"><span>Today net</span><b id="side-net">—</b></div>
+          <div class="stat-row"><span>Trades</span><b id="side-trades">—</b></div>
+          <div class="stat-row"><span>Open</span><b id="side-open">—</b></div>
+        </div>
+        <button class="btn btn-danger" id="kill-btn" data-action="toggle-kill">🛑 Kill switch</button>
+        <button class="btn btn-ghost" data-action="theme">Theme</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="spot">
+          <span class="dot" id="spot-dot"></span>
+          <span class="muted">NIFTY</span>
+          <span class="spot-val" id="spot-val">—</span>
+          <span class="muted small" id="tick-age">last tick: —</span>
+        </div>
+        <div class="range muted small">
+          Prev H <b id="prev-high">—</b> · Prev L <b id="prev-low">—</b>
+          · VIX <b id="vix">—</b>
+        </div>
+        <div class="grow"></div>
+        <span class="badge" id="feed-badge">feed: —</span>
+        <button class="btn btn-ghost btn-small" data-action="refresh">Refresh</button>
+      </header>
+
+      <!-- DASHBOARD -->
+      <section class="view" id="view-dashboard">
+        <div class="kpis" id="kpis"></div>
+        <div class="card">
+          <h2>Strategies</h2>
+          <div class="table-wrap"><table id="dash-table"></table></div>
+        </div>
+        <div class="card">
+          <h2>Closed today</h2>
+          <div class="table-wrap"><table id="dash-ledger"></table></div>
+        </div>
+      </section>
+
+      <!-- STRATEGIES -->
+      <section class="view" id="view-strategies" hidden>
+        <div class="row-actions">
+          <button class="btn btn-primary" data-action="enter-all">Enter all</button>
+          <button class="btn btn-danger-outline" data-action="exit-all">Exit all open</button>
+        </div>
+        <div id="strategy-cards"></div>
+      </section>
+
+      <!-- IPO -->
+      <section class="view" id="view-ipo" hidden>
+        <div class="kpis" id="ipo-kpis"></div>
+
+        <div class="card">
+          <h2>Watchlist</h2>
+          <p class="muted small">
+            Armed names fire when price breaks the listing-day high. Stop is the listing-day low;
+            target is the listing high + 30%. <b>Alert only — no orders are placed.</b>
+          </p>
+          <div class="row-actions" style="margin-bottom:10px">
+            <input id="ipo-symbol" placeholder="NSE symbol e.g. EIEL" class="ipo-input" />
+            <input id="ipo-amount" type="number" step="10000" value="200000" class="ipo-input" style="max-width:130px" />
+            <button class="btn btn-primary btn-small" data-action="ipo-add">Add</button>
+            <label class="small muted" style="display:flex;align-items:center;gap:5px">
+              <input type="checkbox" id="ipo-force" /> force (ignore eligibility)
+            </label>
+          </div>
+          <div class="table-wrap"><table id="ipo-table"></table></div>
+        </div>
+
+        <div class="card">
+          <h2>Scan for recent listings</h2>
+          <p class="muted small">
+            Walks the NSE equity master and derives each listing date from its first-ever daily candle.
+            Takes several minutes; runs in the background.
+          </p>
+          <div class="row-actions">
+            <button class="btn btn-primary btn-small" data-action="ipo-scan">Start scan</button>
+            <button class="btn btn-ghost btn-small" data-action="ipo-scan-cancel">Cancel</button>
+            <span class="small muted" id="ipo-scan-status">—</span>
+          </div>
+          <div class="table-wrap" style="margin-top:10px"><table id="ipo-scan-table"></table></div>
+        </div>
+
+        <div class="card">
+          <h2>Triggered</h2>
+          <div class="table-wrap"><table id="ipo-ledger-table"></table></div>
+        </div>
+      </section>
+
+      <!-- LEDGER -->
+      <section class="view" id="view-ledger" hidden>
+        <div class="card">
+          <h2>Ledger — today</h2>
+          <div class="totals" id="ledger-totals"></div>
+          <div class="table-wrap"><table id="ledger-table"></table></div>
+        </div>
+      </section>
+
+      <!-- ACTIVE -->
+      <section class="view" id="view-active" hidden>
+        <div class="card">
+          <h2>Active — anything that can place an order</h2>
+          <p class="muted small">
+            If something in this app could send a real order right now, it must appear here.
+            Rows in red involve real money.
+          </p>
+          <div class="table-wrap"><table id="active-table"></table></div>
+        </div>
+      </section>
+
+      <!-- ACTIVITY -->
+      <section class="view" id="view-activity" hidden>
+        <div class="card">
+          <h2>Activity log</h2>
+          <p class="muted small">Every order placed, blocked or failed, and every kill-switch change.</p>
+          <div class="table-wrap"><table id="activity-table"></table></div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view" id="view-settings" hidden>
+        <div class="card">
+          <h2>Pre-market check</h2>
+          <div class="row-actions" style="margin-bottom:10px">
+            <button class="btn btn-primary btn-small" data-action="run-health">Run now</button>
+            <label class="small muted" style="display:flex;align-items:center;gap:5px">
+              <input type="checkbox" id="health-announce" /> also send to Telegram
+            </label>
+            <span class="small muted" id="health-when">—</span>
+          </div>
+          <div class="table-wrap"><table id="health-table"></table></div>
+        </div>
+
+        <div class="card">
+          <h2>Telegram alerts</h2>
+          <p class="muted small">
+            Alerts on entry, exit, partial fills, kill-switch changes, IPO breakouts,
+            the pre-market check and the EOD summary.
+          </p>
+          <div id="telegram-status" class="totals"></div>
+          <div class="row-actions">
+            <input id="tg-token" class="ipo-input" placeholder="Bot token (blank = keep)" style="max-width:320px" />
+            <input id="tg-chat" class="ipo-input" placeholder="Chat ID" style="max-width:160px" />
+            <button class="btn btn-primary btn-small" data-action="tg-save">Save</button>
+            <button class="btn btn-ghost btn-small" data-action="tg-test">Send test</button>
+            <button class="btn btn-danger-outline btn-small" data-action="tg-clear">Clear</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Broker login</h2>
+          <div id="settings-broker"></div>
+        </div>
+
+        <div class="card">
+          <h2>Automatic daily login</h2>
+          <p class="muted small">
+            Upstox tokens expire around 03:30 IST every day and there is no silent refresh.
+            With this on, the app logs itself back in by driving the real Upstox login page
+            with your mobile, PIN and a TOTP code.
+          </p>
+          <div class="totp-panel" id="totp-panel">
+            <div class="totp-label">Current TOTP — click to copy</div>
+            <button class="totp-big" id="totp-code" data-action="copy-totp">------</button>
+            <div class="totp-bar wide"><i id="totp-bar"></i></div>
+            <div class="totp-hint small muted" id="totp-hint">refreshes automatically every 30s</div>
+          </div>
+
+          <div id="autologin-status" class="totals"></div>
+          <div class="row-actions">
+            <button class="btn btn-primary btn-small" data-action="al-test">Test login now</button>
+            <button class="btn btn-ghost btn-small" data-action="al-toggle">Enable / disable</button>
+            <span class="small muted" id="al-msg"></span>
+          </div>
+          <p class="muted small" id="al-help" style="margin-top:10px"></p>
+        </div>
+        <div class="card">
+          <h2>Feed health</h2>
+          <div id="settings-feed"></div>
+        </div>
+        <div class="card">
+          <h2>Recent errors</h2>
+          <div class="table-wrap"><table id="errors-table"></table></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/dashboard/app.js"></script>
+</body>
+</html>
