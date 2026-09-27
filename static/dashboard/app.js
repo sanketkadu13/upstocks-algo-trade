@@ -132,59 +132,107 @@ const kpi = (label, val, sub, klass = "") =>
   `<div class="kpi"><div class="kpi-label">${esc(label)}</div>
    <div class="kpi-val ${klass}">${val}</div><div class="kpi-sub">${esc(sub || "")}</div></div>`;
 
-const modePill = (m) => `<span class="pill ${m === "live" ? "pill-live-mode" : "pill-paper"}">${esc(m)}</span>`;
+const modePill = (m) =>
+  `<span class="pill ${m === "live" ? "pill-live-mode" : m === "monitor" ? "pill-monitor" : "pill-paper"}">${esc(m)}</span>`;
 const statusPill = (s) =>
   `<span class="pill pill-${esc(s.status)}">${esc(s.status)}</span>` +
   (s.detail ? `<div class="small muted">${esc(s.detail)}</div>` : "");
+
+// Strategies with edits you haven't saved yet. While a card is dirty its
+// form is never re-rendered — losing a half-typed stop-loss because a price
+// tick arrived is not acceptable — but the live numbers on it keep updating.
+const dirty = new Set();
 
 function renderStrategies() {
   const host = $("#strategy-cards");
   const strats = STATE.strategies || [];
   if (!strats.length) { host.innerHTML = `<div class="card empty">No strategies.</div>`; return; }
 
+  const existing = new Set($$("#strategy-cards [data-sid]").map((el) => el.dataset.sid));
+  const sameCards = strats.length === existing.size && strats.every((s) => existing.has(s.id));
+
+  // Rebuild only when the set of cards changed or nothing is being edited.
+  if (dirty.size && sameCards) {
+    strats.forEach(updateStrategyLive);
+    return;
+  }
   host.innerHTML = strats.map(strategyCard).join("");
+}
+
+/** Refresh just the live values on a card, leaving every input alone. */
+function updateStrategyLive(s) {
+  const card = document.querySelector(`#strategy-cards [data-sid="${CSS.escape(s.id)}"]`);
+  if (!card) return;
+  const m = s.mtm;
+
+  const set = (sel, html) => {
+    const el = card.querySelector(sel);
+    if (el && el.innerHTML !== html) el.innerHTML = html;
+  };
+
+  set("[data-live=status]", statusPill(s));
+  set("[data-live=mtm]", m.combined_exit != null ? inr(m.combined_exit, 0) : "—");
+  const hero = card.querySelector("[data-live=mtm]");
+  if (hero) hero.className = "mtm-big " + cls(m.combined_exit);
+  set(
+    "[data-live=meta]",
+    `<span>at LTP <b>${inr(m.combined_ltp, 0)}</b></span>
+     <span>slippage <b>${inr(m.slippage, 0)}</b></span>
+     <span>peak <b>${inr(s.trigger.peak_day, 0)}</b></span>
+     <span>worst <b>${inr(s.trigger.trough_day, 0)}</b></span>`
+  );
+  set("[data-live=legs]", legRowsHtml(s));
+}
+
+function legRowsHtml(s) {
+  const m = s.mtm;
+  const plan = s.plan;
+  if (s.status === "live") {
+    return m.legs
+      .map(
+        (l) => `<tr>
+          <td>${esc(l.symbol)}</td><td class="num">${l.qty}</td>
+          <td class="num">${num(l.avg_entry)}</td><td class="num">${num(l.ltp)}</td>
+          <td class="num">${num(l.exit_price)}</td>
+          <td class="num ${cls(l.mtm_exit)}">${inr(l.mtm_exit, 0)}</td></tr>`
+      )
+      .join("");
+  }
+  if (plan && !plan.error) {
+    return ["ce", "pe"]
+      .map((k) => {
+        const t = plan[k].tick;
+        return `<tr><td>${esc(plan[k].symbol)}</td><td class="num">-${plan.qty_per_leg}</td>
+          <td class="num">—</td><td class="num">${t ? num(t.ltp) : "—"}</td>
+          <td class="num">${t && t.ask ? num(t.ask) : "—"}</td><td class="num">—</td></tr>`;
+      })
+      .join("");
+  }
+  return "";
 }
 
 function strategyCard(s) {
   const m = s.mtm;
   const live = s.status === "live";
   const plan = s.plan;
-
-  const legRows = live
-    ? m.legs
-        .map(
-          (l) => `<tr>
-            <td>${esc(l.symbol)}</td><td class="num">${l.qty}</td>
-            <td class="num">${num(l.avg_entry)}</td><td class="num">${num(l.ltp)}</td>
-            <td class="num">${num(l.exit_price)}</td>
-            <td class="num ${cls(l.mtm_exit)}">${inr(l.mtm_exit, 0)}</td></tr>`
-        )
-        .join("")
-    : plan && !plan.error
-    ? ["ce", "pe"]
-        .map((k) => {
-          const t = plan[k].tick;
-          return `<tr><td>${esc(plan[k].symbol)}</td><td class="num">-${plan.qty_per_leg}</td>
-            <td class="num">—</td><td class="num">${t ? num(t.ltp) : "—"}</td>
-            <td class="num">${t && t.ask ? num(t.ask) : "—"}</td><td class="num">—</td></tr>`;
-        })
-        .join("")
-    : "";
+  const legRows = legRowsHtml(s);
 
   return `<div class="card strategy" data-sid="${esc(s.id)}">
     <div class="strategy-head">
       <span class="strategy-name">${esc(s.name)}</span>
-      ${modePill(s.mode)} ${statusPill(s)}
+      ${modePill(s.mode)} <span data-live="status">${statusPill(s)}</span>
       <div class="grow"></div>
       ${live
         ? `<button class="btn btn-danger-outline btn-small" data-action="exit" data-sid="${esc(s.id)}">Square off</button>`
-        : `<button class="btn btn-primary btn-small" data-action="enter" data-sid="${esc(s.id)}">Enter now</button>`}
+        : `<button class="btn btn-primary btn-small" data-action="enter" data-sid="${esc(s.id)}">Enter now</button>
+           <button class="btn btn-ghost btn-small" data-action="adopt" data-sid="${esc(s.id)}"
+                   title="Track a position you opened yourself in Upstox">Import open position</button>`}
     </div>
 
     ${live
       ? `<div class="mtm-hero">
-           <span class="mtm-big ${cls(m.combined_exit)}">${inr(m.combined_exit, 0)}</span>
-           <div class="mtm-meta">
+           <span class="mtm-big ${cls(m.combined_exit)}" data-live="mtm">${inr(m.combined_exit, 0)}</span>
+           <div class="mtm-meta" data-live="meta">
              <span>at LTP <b>${inr(m.combined_ltp, 0)}</b></span>
              <span>slippage <b>${inr(m.slippage, 0)}</b></span>
              <span>peak <b>${inr(s.trigger.peak_day, 0)}</b></span>
@@ -203,7 +251,7 @@ function strategyCard(s) {
       ? `<div class="table-wrap"><table>
           <thead><tr><th>Leg</th><th class="num">Qty</th><th class="num">Entry</th>
           <th class="num">LTP</th><th class="num">Exit at</th><th class="num">P&L</th></tr></thead>
-          <tbody>${legRows}</tbody></table></div>`
+          <tbody data-live="legs">${legRows}</tbody></table></div>`
       : ""}
 
     <div class="cfg-grid" data-cfg="${esc(s.id)}">
@@ -213,6 +261,7 @@ function strategyCard(s) {
       <label>Mode
         <select data-k="mode">
           <option value="paper" ${s.mode === "paper" ? "selected" : ""}>paper</option>
+          <option value="monitor" ${s.mode === "monitor" ? "selected" : ""}>monitor (alert only)</option>
           <option value="live" ${s.mode === "live" ? "selected" : ""}>LIVE</option>
         </select>
       </label>
@@ -716,6 +765,20 @@ document.addEventListener("click", async (ev) => {
     } else if (a === "ipo-scan-cancel") {
       await api("/api/ipo/scan/cancel", { method: "POST" });
       await renderIpo();
+    } else if (a === "adopt") {
+      const { positions } = await api("/api/positions");
+      if (!positions.length) return alert("No open positions at the broker.");
+      const list = positions
+        .map((p) => `  ${p.symbol}  ${p.qty} @ ${p.avg_entry}`)
+        .join("\n");
+      const ok = confirm(
+        "Track these open positions?\n\n" + list +
+          "\n\nEntry prices come from the broker."
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      await api(`/api/strategies/${sid}/adopt`, { method: "POST", body: JSON.stringify({}) });
+      await refresh();
     } else if (a === "copy-totp") {
       await copyTotp(btn);
     } else if (a === "al-test") {
@@ -761,9 +824,25 @@ document.addEventListener("click", async (ev) => {
         patch[el.dataset.k] = el.type === "checkbox" ? el.checked : el.value;
       });
       if (patch.mode === "live" && !confirm("Switch this strategy to LIVE (real orders)?")) return;
-      await api(`/api/strategies/${sid}/config`, { method: "POST", body: JSON.stringify(patch) });
-      const note = document.querySelector(`[data-saved="${sid}"]`);
-      if (note) { note.textContent = "Saved"; setTimeout(() => (note.textContent = ""), 2000); }
+      const saved = await api(`/api/strategies/${sid}/config`, {
+        method: "POST",
+        body: JSON.stringify(patch),
+      });
+      const bad = saved.rejected || {};
+      if (Object.keys(bad).length) {
+        const lines = Object.entries(bad).map(function (e) {
+          return "\n  " + e[0] + " - " + e[1];
+        });
+        alert("Some settings were NOT saved:" + lines.join(""));
+      }
+      // Only now is it safe to let the card re-render from server state.
+      dirty.delete(sid);
+      const note = document.querySelector(`[data-saved="${CSS.escape(sid)}"]`);
+      if (note) {
+        note.textContent = "Saved ✓";
+        note.className = "small pos";
+        setTimeout(() => { note.textContent = ""; note.className = "small muted"; }, 2500);
+      }
       await refresh();
     }
   } catch (e) {
@@ -774,12 +853,29 @@ document.addEventListener("click", async (ev) => {
 });
 
 // Don't let a poll overwrite a field mid-edit.
-let editing = false;
-document.addEventListener("focusin", (e) => { if (e.target.closest(".cfg-grid")) editing = true; });
-document.addEventListener("focusout", () => setTimeout(() => (editing = false), 150));
+// Mark a strategy dirty as soon as you touch any of its settings, and keep
+// it dirty until the save succeeds. Focus is not a reliable signal here: you
+// can type a value, click away to read the P&L, and still expect the number
+// you typed to be there.
+document.addEventListener("input", (e) => {
+  const grid = e.target.closest("[data-cfg]");
+  if (!grid) return;
+  dirty.add(grid.dataset.cfg);
+  markUnsaved(grid.dataset.cfg, true);
+});
+document.addEventListener("change", (e) => {
+  const grid = e.target.closest("[data-cfg]");
+  if (!grid) return;
+  dirty.add(grid.dataset.cfg);
+  markUnsaved(grid.dataset.cfg, true);
+});
 
-const origRenderStrategies = renderStrategies;
-renderStrategies = function () { if (!editing) origRenderStrategies(); };
+function markUnsaved(sid, on) {
+  const note = document.querySelector(`[data-saved="${CSS.escape(sid)}"]`);
+  if (!note) return;
+  note.textContent = on ? "unsaved changes" : "";
+  note.className = on ? "small neg" : "small muted";
+}
 
 window.addEventListener("hashchange", () => setView(location.hash.replace("#", "") || "dashboard"));
 

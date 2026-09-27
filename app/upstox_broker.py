@@ -21,6 +21,42 @@ from app.timeutil import ist_now as _ist_now
 logger = logging.getLogger("upstox_broker")
 
 
+class UpstoxApiError(RuntimeError):
+    """Carries Upstox's own error code and message.
+
+    raise_for_status() alone gives only '403 Forbidden', which is useless for
+    diagnosis — the body is where Upstox says *why* (IP not whitelisted, app
+    lacks order permission, algo not registered, insufficient funds...).
+    """
+
+    def __init__(self, action: str, response: httpx.Response):
+        self.status = response.status_code
+        self.code = None
+        self.detail = None
+        try:
+            body = response.json()
+            errors = body.get("errors") or []
+            if errors:
+                self.code = errors[0].get("errorCode") or errors[0].get("error_code")
+                self.detail = errors[0].get("message")
+            else:
+                self.detail = body.get("message") or str(body)[:300]
+        except Exception:
+            self.detail = (response.text or "")[:300]
+        bits = [f"{action} failed: HTTP {self.status}"]
+        if self.code:
+            bits.append(f"[{self.code}]")
+        if self.detail:
+            bits.append(str(self.detail))
+        super().__init__(" ".join(bits))
+
+
+def _check(action: str, response: httpx.Response) -> httpx.Response:
+    if response.is_error:
+        raise UpstoxApiError(action, response)
+    return response
+
+
 def _token_expiry_for(obtained_at: datetime) -> datetime:
     """Upstox tokens expire ~03:30 IST the day after they're issued (or same
     day if issued after 03:30 already puts you past the prior expiry)."""
@@ -93,7 +129,7 @@ class UpstoxBroker(BrokerBase):
             headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
             timeout=15.0,
         )
-        resp.raise_for_status()
+        _check("token exchange", resp)
         body = resp.json()
         self._save_token(body["access_token"])
 
@@ -143,7 +179,7 @@ class UpstoxBroker(BrokerBase):
                 headers=self._auth_headers(),
                 timeout=10.0,
             )
-            resp.raise_for_status()
+            _check("LTP quote", resp)
             body = resp.json()
         except AuthRequired:
             raise
@@ -161,13 +197,13 @@ class UpstoxBroker(BrokerBase):
     def historical_candles(self, instrument_key: str, interval: str, to_date: str, from_date: str) -> list:
         url = f"{settings.upstox_historical_url}/{instrument_key}/{interval}/{to_date}/{from_date}"
         resp = httpx.get(url, headers=self._auth_headers(), timeout=20.0)
-        resp.raise_for_status()
+        _check("historical candles", resp)
         return resp.json().get("data", {}).get("candles", [])
 
     def intraday_candles(self, instrument_key: str, interval: str) -> list:
         url = f"{settings.upstox_historical_url}/intraday/{instrument_key}/{interval}"
         resp = httpx.get(url, headers=self._auth_headers(), timeout=20.0)
-        resp.raise_for_status()
+        _check("historical candles", resp)
         return resp.json().get("data", {}).get("candles", [])
 
     # -- orders -----------------------------------------------------------
@@ -200,7 +236,7 @@ class UpstoxBroker(BrokerBase):
             headers={**self._auth_headers(), "Content-Type": "application/json"},
             timeout=15.0,
         )
-        resp.raise_for_status()
+        _check("place order", resp)
         return resp.json().get("data", {})
 
     def order_status(self, order_id: str) -> dict:
@@ -210,7 +246,7 @@ class UpstoxBroker(BrokerBase):
             headers=self._auth_headers(),
             timeout=10.0,
         )
-        resp.raise_for_status()
+        _check("order status", resp)
         return resp.json().get("data", {})
 
     def modify_order(self, order_id: str, price: float, quantity: int | None = None,
@@ -224,7 +260,7 @@ class UpstoxBroker(BrokerBase):
             headers={**self._auth_headers(), "Content-Type": "application/json"},
             timeout=15.0,
         )
-        resp.raise_for_status()
+        _check("modify order", resp)
         return resp.json().get("data", {})
 
     def cancel_order(self, order_id: str) -> dict:
@@ -234,7 +270,7 @@ class UpstoxBroker(BrokerBase):
             headers=self._auth_headers(),
             timeout=15.0,
         )
-        resp.raise_for_status()
+        _check("cancel order", resp)
         return resp.json().get("data", {})
 
     def funds(self) -> dict:
@@ -244,7 +280,7 @@ class UpstoxBroker(BrokerBase):
             headers=self._auth_headers(),
             timeout=10.0,
         )
-        resp.raise_for_status()
+        _check("funds", resp)
         return resp.json().get("data", {})
 
     def profile(self) -> dict:
@@ -253,7 +289,7 @@ class UpstoxBroker(BrokerBase):
             headers=self._auth_headers(),
             timeout=10.0,
         )
-        resp.raise_for_status()
+        _check("profile", resp)
         return resp.json().get("data", {})
 
     def token_expiry_ist(self) -> datetime | None:
@@ -261,7 +297,7 @@ class UpstoxBroker(BrokerBase):
 
     def positions(self) -> list[dict]:
         resp = httpx.get(settings.upstox_positions_url, headers=self._auth_headers(), timeout=10.0)
-        resp.raise_for_status()
+        _check("positions", resp)
         return resp.json().get("data", [])
 
     def live_price_feed(self, keys: list[str], on_tick: Callable[[str, float, float], None]):

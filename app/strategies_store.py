@@ -35,7 +35,12 @@ DEFAULTS: dict[str, Any] = {
     "kind": "strangle_prev_day_range",
     "order": 0,
     "enabled": True,
-    "mode": "paper",  # paper | live
+    # paper   — simulated fills, no broker orders
+    # live    — real orders (requires the request IP to be whitelisted with Upstox)
+    # monitor — track a position you opened yourself; alerts on triggers but
+    #           never places an order. The honest mode when order placement
+    #           isn't possible from where this is running.
+    "mode": "paper",
     "lots": 1,
     # Targets. Each side can be disabled independently, and each can be judged
     # on LTP or on the realistic exit price (see basis note below).
@@ -124,38 +129,77 @@ def next_sid(existing: dict[str, dict]) -> str:
     return f"s{n}"
 
 
-def validate_patch(patch: dict) -> dict:
-    """Whitelist + coerce. Unknown keys are dropped rather than persisted."""
+def normalize_time(value: Any) -> str | None:
+    """Accept what a browser time input may send and return canonical HH:MM.
+
+    <input type="time"> yields "HH:MM" normally but "HH:MM:SS" once a step is
+    involved, and browsers differ. Rejecting the seconds form silently dropped
+    the field, so the save appeared to work and the time snapped back.
+    """
+    text = str(value).strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def validate_patch(patch: dict) -> tuple[dict, dict[str, str]]:
+    """Whitelist + coerce.
+
+    Returns (clean, rejected). Rejected entries are reported rather than
+    dropped in silence — a setting that vanishes on save with no explanation
+    is worse than an error, because you believe the new value took effect.
+    """
     out: dict[str, Any] = {}
+    rejected: dict[str, str] = {}
+
     for key, value in patch.items():
         if key not in DEFAULTS:
+            rejected[key] = "unknown setting"
             continue
         default = DEFAULTS[key]
         try:
             if isinstance(default, bool):
                 out[key] = bool(value)
             elif isinstance(default, int) and not isinstance(default, bool):
-                out[key] = int(value)
+                if str(value).strip() == "":
+                    raise ValueError("empty")
+                out[key] = int(float(value))     # "2.0" from a number input
             elif isinstance(default, float):
-                out[key] = float(value)
+                if str(value).strip() == "":
+                    raise ValueError("empty")
+                out[key] = float(str(value).replace(",", ""))   # "1,800"
             else:
                 out[key] = str(value).strip()
         except (TypeError, ValueError):
-            continue
+            rejected[key] = f"{value!r} is not a valid {type(default).__name__}"
 
-    if "mode" in out and out["mode"] not in ("paper", "live"):
-        out.pop("mode")
+    if "mode" in out and out["mode"] not in ("paper", "live", "monitor"):
+        rejected["mode"] = f"{out.pop('mode')!r} must be paper, live or monitor"
     if "kind" in out and out["kind"] not in STRATEGY_KINDS:
-        out.pop("kind")
+        rejected["kind"] = f"{out.pop('kind')!r} is not a known strategy kind"
     for basis_key in ("profit_target_basis", "loss_limit_basis"):
         if basis_key in out and out[basis_key] not in ("ltp", "exit"):
-            out.pop(basis_key)
+            rejected[basis_key] = f"{out.pop(basis_key)!r} must be ltp or exit"
+
     for time_key in ("auto_entry_time", "eod_squareoff_time"):
         if time_key in out:
-            try:
-                h, m = out[time_key].split(":")
-                if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
-                    raise ValueError
-            except Exception:
-                out.pop(time_key)
-    return out
+            canonical = normalize_time(out[time_key])
+            if canonical is None:
+                rejected[time_key] = f"{out.pop(time_key)!r} is not a valid HH:MM time"
+            else:
+                out[time_key] = canonical
+
+    for positive_key in ("lots", "profit_target", "loss_limit"):
+        if positive_key in out and out[positive_key] <= 0:
+            rejected[positive_key] = f"{out.pop(positive_key)} must be greater than zero"
+
+    return out, rejected

@@ -58,6 +58,27 @@ CHASE_WAIT_S = 3.0
 EXTERNAL_CHECK_EVERY_TICKS = 15
 
 
+def _entry_price(position: dict, qty: int) -> float:
+    """What this position was actually opened at.
+
+    Upstox reports `average_price: 0.0` for an intraday short and puts the
+    real fill in `sell_price` (and the mirror for a long). Adopting on
+    average_price would mark an open short as if it were entered at zero,
+    producing a P&L that is wrong by the entire premium.
+    """
+    if qty < 0:
+        for field in ("sell_price", "day_sell_price", "average_price"):
+            value = float(position.get(field) or 0)
+            if value:
+                return value
+    else:
+        for field in ("buy_price", "day_buy_price", "average_price"):
+            value = float(position.get(field) or 0)
+            if value:
+                return value
+    return 0.0
+
+
 @dataclass
 class Runtime:
     sid: str
@@ -72,6 +93,9 @@ class Runtime:
     snapshot: MtmSnapshot | None = None
     exit_in_flight: bool = False
     tick_count: int = 0
+    # monitor mode: the trigger we've already alerted on, so a breached
+    # target doesn't re-notify on every tick
+    alerted_reason: str | None = None
 
     def to_persisted(self) -> dict:
         return {
@@ -395,6 +419,94 @@ class StrategyEngine:
         finally:
             with self._lock:
                 self.runtimes[sid].exit_in_flight = False
+
+    def broker_positions(self) -> list[dict]:
+        """Open broker positions, enriched with the instrument symbol."""
+        try:
+            raw = self.broker.positions()
+        except Exception as e:
+            raise RuntimeError(f"could not read positions: {e}") from e
+
+        out = []
+        for p in raw:
+            qty = int(p.get("quantity") or 0)
+            if not qty:
+                continue
+            key = p.get("instrument_token") or p.get("instrument_key")
+            out.append(
+                {
+                    "instrument_key": key,
+                    "symbol": p.get("tradingsymbol") or p.get("trading_symbol") or key,
+                    "qty": qty,
+                    "avg_entry": _entry_price(p, qty),
+                    "product": p.get("product"),
+                    "exchange": p.get("exchange"),
+                    "broker_pnl": p.get("pnl"),
+                    "last_price": p.get("last_price"),
+                    "tick": cache.get(key),
+                }
+            )
+        return out
+
+    def adopt_positions(self, sid: str, instrument_keys: list[str] | None = None) -> dict:
+        """Take over a position opened outside this app.
+
+        The entry prices come from the broker's own average price, so the P&L
+        the engine shows matches what the broker shows rather than a guess.
+        """
+        with self._lock:
+            rt = self.runtimes[sid]
+            if rt.status == STATUS_LIVE and rt.legs:
+                return {"ok": False, "error": "this strategy is already tracking a position"}
+
+        try:
+            positions = self.broker_positions()
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        if not positions:
+            return {"ok": False, "error": "no open positions at the broker"}
+
+        if instrument_keys:
+            positions = [p for p in positions if p["instrument_key"] in set(instrument_keys)]
+            if not positions:
+                return {"ok": False, "error": "none of the selected instruments are open"}
+
+        legs = [
+            Leg(
+                instrument_key=p["instrument_key"],
+                symbol=p["symbol"],
+                qty=p["qty"],
+                avg_entry=p["avg_entry"],
+                lot_size=instruments.nifty_lot_size(),
+            )
+            for p in positions
+            if p["avg_entry"] > 0
+        ]
+        if not legs:
+            return {"ok": False, "error": "positions have no usable average price yet"}
+
+        with self._lock:
+            rt = self.runtimes[sid]
+            rt.legs = legs
+            rt.status = STATUS_LIVE
+            rt.trigger = TriggerState()
+            rt.session_id = uuid.uuid4().hex[:12]
+            rt.entry_time = ist_now().isoformat(timespec="seconds")
+            rt.exit_reason = None
+            rt.exit_time = None
+            rt.detail = "adopted from broker — opened outside this app"
+            rt.alerted_reason = None
+        self._persist()
+        self._subscribe_legs(legs)
+
+        audit.log_event("positions_adopted", sid=sid,
+                        legs=[{"symbol": l.symbol, "qty": l.qty, "avg": l.avg_entry} for l in legs])
+        notify.send_async(
+            "*ADOPTED* — now monitoring a position opened outside the app\n"
+            + "\n".join(f"  {l.symbol} {l.qty} @ {l.avg_entry:.2f}" for l in legs)
+        )
+        logger.info("%s adopted %d legs from broker", sid, len(legs))
+        return {"ok": True, "legs": [l.__dict__ for l in legs]}
 
     def held_quantities(self) -> dict[str, int] | None:
         """Signed quantities actually held at the broker, or None if unknown."""
@@ -748,8 +860,11 @@ class StrategyEngine:
                 if not reason and self._is_past_eod(cfg):
                     reason, detail = "EOD_SQUAREOFF", "intraday square-off time reached"
                 if reason:
-                    self.exit(sid, reason, detail)
-                    return
+                    if cfg["mode"] == "monitor":
+                        self._alert_trigger(sid, cfg, rt, snapshot, reason, detail)
+                    else:
+                        self.exit(sid, reason, detail)
+                        return
 
             if rt.tick_count % EXTERNAL_CHECK_EVERY_TICKS == 0:
                 self._detect_external_squareoff(sid)
@@ -758,6 +873,29 @@ class StrategyEngine:
 
         elif rt.status in (STATUS_IDLE, STATUS_SKIPPED):
             self._maybe_auto_enter(sid, cfg, rt)
+
+    def _alert_trigger(self, sid, cfg, rt, snapshot, reason, detail) -> None:
+        """Monitor mode: say it loudly, place nothing.
+
+        The position was opened outside this app (or orders can't be placed
+        from here), so the engine must not pretend it can close it. Alert
+        once per distinct trigger and keep tracking.
+        """
+        if rt.alerted_reason == reason:
+            return
+        rt.alerted_reason = reason
+        pnl = snapshot.combined_exit
+        msg = (
+            f"{cfg.get('name', sid)} hit *{reason}* — P&L ₹{pnl:,.0f}\n"
+            f"{detail}\n\n"
+            "_Monitor mode: no order was placed. Square off manually._"
+        )
+        logger.warning("%s: MONITOR trigger %s at %.0f", sid, reason, pnl)
+        audit.log_event("monitor_trigger", sid=sid, reason=reason, pnl=round(pnl, 2))
+        cache.log_error("strategy_engine.monitor", f"{sid}: {reason} at {pnl:.0f} — exit manually")
+        notify.send_async("🔔 " + msg)
+        rt.detail = f"{reason} reached at ₹{pnl:,.0f} — square off manually (monitor mode)"
+        self._persist()
 
     def _is_past_eod(self, cfg: dict) -> bool:
         if not cfg.get("eod_squareoff_enabled", True):
@@ -802,9 +940,16 @@ class StrategyEngine:
         self.enter(sid, source="auto")
 
     def _detect_external_squareoff(self, sid: str) -> None:
-        """If a leg was closed in the Upstox app, stop pretending we hold it."""
+        """If a leg was closed in the Upstox app, stop pretending we hold it.
+
+        Runs for any mode backed by a real broker position. Monitor mode
+        needs this most of all: that mode exists precisely because you close
+        the position yourself, and without the check the engine would keep
+        marking a phantom position and alerting on a target you no longer
+        hold. Paper has nothing at the broker to compare against.
+        """
         cfg = self.strategies[sid]
-        if cfg["mode"] != "live":
+        if cfg["mode"] not in ("live", "monitor"):
             return
         try:
             positions = self.broker.positions()
@@ -822,6 +967,7 @@ class StrategyEngine:
             if not rt.legs:
                 rt.status = STATUS_CLOSED
                 rt.exit_reason = "EXTERNAL"
+                rt.alerted_reason = None
         logger.warning("%s: %s", sid, detail)
         audit.log_event("external_squareoff", sid=sid, detail=detail)
         notify.notify_problem(f"Position closed outside the app — {cfg.get('name', sid)}", detail)

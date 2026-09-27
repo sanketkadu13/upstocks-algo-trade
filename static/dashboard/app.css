@@ -178,6 +178,7 @@ td.num, th.num { text-align: right; }
 .pill-error { background: var(--red); color: #fff; }
 .pill-paper { background: color-mix(in srgb, var(--blue) 20%, transparent); color: var(--blue); }
 .pill-live-mode { background: var(--red); color: #fff; }
+.pill-monitor { background: color-mix(in srgb, var(--amber) 22%, transparent); color: var(--amber); }
 
 /* ---------- TOTP ---------- */
 .totp-panel {

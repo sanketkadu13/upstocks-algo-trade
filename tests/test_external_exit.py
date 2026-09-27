@@ -95,7 +95,9 @@ def engine(tmp_path, monkeypatch):
         eng.runtimes = {"s1": rt}
         eng.date = "2026-09-21"
         eng.prev_range = {}
+        eng._prev_range_attempt = 0.0
         eng._plans = {}
+        eng._plans_refreshed = 9e9  # don't hit the network in tests
         eng._persist = lambda: None
         return eng
 
@@ -150,19 +152,32 @@ def test_closed_strategy_cannot_be_exited_again(engine):
 
 
 def test_closed_strategy_does_not_auto_reenter(engine):
-    """After an external close the engine must not open a fresh position."""
+    """After an external close the engine must not open a fresh position.
+
+    Drives _tick_one (the real path), with the auto-entry window pinned open
+    right now so the result doesn't depend on when the suite happens to run.
+    """
+    from app.timeutil import ist_now
+
     eng = engine(held={})
     eng.exit("s1", reason="EOD_SQUAREOFF")
+    assert eng.runtimes["s1"].status == STATUS_CLOSED
+    eng.gateway.orders.clear()
 
-    cfg = eng.strategies["s1"]
-    cfg.update({"auto_entry_enabled": True, "auto_entry_time": "09:45",
-                "auto_entry_grace_minutes": 10, "enabled": True})
-    rt = eng.runtimes["s1"]
+    now = ist_now()
+    eng.strategies["s1"].update({
+        "auto_entry_enabled": True,
+        "auto_entry_time": now.strftime("%H:%M"),   # window is open this minute
+        "auto_entry_grace_minutes": 30,
+        "auto_entry_last_fired": None,
+        "enabled": True,
+        "eod_squareoff_enabled": False,
+    })
 
-    eng._maybe_auto_enter("s1", cfg, rt)
+    eng._tick_one("s1")
 
     assert eng.gateway.orders == [], "auto-entry re-opened a manually closed position"
-    assert rt.status == STATUS_CLOSED
+    assert eng.runtimes["s1"].status == STATUS_CLOSED
 
 
 def test_exit_proceeds_when_positions_api_is_unavailable(engine, monkeypatch):

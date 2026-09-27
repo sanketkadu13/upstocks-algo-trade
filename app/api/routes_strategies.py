@@ -98,17 +98,23 @@ async def delete_strategy(sid: str, request: Request):
 async def update_config(sid: str, patch: ConfigPatch, request: Request):
     engine = _engine(request)
     _require(engine, sid)
-    clean = strategies_store.validate_patch(patch.model_dump())
+    clean, rejected = strategies_store.validate_patch(patch.model_dump())
     if not clean:
-        raise HTTPException(400, "no valid fields in patch")
+        detail = "; ".join(f"{k}: {v}" for k, v in rejected.items()) or "no valid fields in patch"
+        raise HTTPException(400, detail)
 
     if clean.get("mode") == "live" and not request.app.state.broker.is_authenticated():
         raise HTTPException(409, "cannot switch to LIVE: broker not authenticated")
 
     engine.strategies[sid].update(clean)
     strategies_store.save_all(engine.strategies)
-    audit.log_event("strategy_config_changed", sid=sid, changes=clean)
-    return engine.strategy_view(sid)
+    audit.log_event("strategy_config_changed", sid=sid, changes=clean, rejected=rejected or None)
+
+    view = engine.strategy_view(sid)
+    # Tell the caller what did NOT get saved, so a silently ignored field
+    # can't masquerade as a successful save.
+    view["rejected"] = rejected
+    return view
 
 
 @router.get("/api/strategies/{sid}/plan")
@@ -129,6 +135,30 @@ async def enter(sid: str, request: Request):
     except AuthRequired as e:
         raise HTTPException(401, f"broker re-auth required: {e.login_url}")
     if not result.get("ok") and result.get("error"):
+        raise HTTPException(400, result["error"])
+    return result
+
+
+class AdoptBody(BaseModel):
+    instrument_keys: list[str] | None = None
+
+
+@router.get("/api/positions")
+async def broker_positions(request: Request):
+    """Open positions at the broker, whether or not this app opened them."""
+    try:
+        return {"positions": _engine(request).broker_positions()}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@router.post("/api/strategies/{sid}/adopt")
+async def adopt(sid: str, body: AdoptBody, request: Request):
+    """Track a position that was opened outside this app."""
+    engine = _engine(request)
+    _require(engine, sid)
+    result = engine.adopt_positions(sid, body.instrument_keys)
+    if not result.get("ok"):
         raise HTTPException(400, result["error"])
     return result
 
